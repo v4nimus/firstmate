@@ -1,4 +1,4 @@
-// Pi 0.81.1 and 0.82.0 add the ordinary-user spacer and row together.
+// Pi 0.81.1 through 0.82.1 add the ordinary-user spacer and row together.
 // This version-bounded adapter changes only that presentation and never message delivery.
 import {
   InteractiveMode,
@@ -23,6 +23,13 @@ type InteractiveModePresentation = {
   editor: {
     addToHistory?(text: string): void;
   };
+  ui: {
+    invalidate(): void;
+    requestRender(force?: boolean): void;
+    terminal: {
+      clearScreen(): void;
+    };
+  };
   getMarkdownThemeWithSettings(): UserMessageConstructorArgs[1];
   getUserMessageText(message: UserMessageLike): string;
   outputPad: number;
@@ -33,8 +40,13 @@ type InteractiveModePrototype = {
     message: UserMessageLike,
     options?: AddMessageOptions,
   ): void;
+  setToolsExpanded(
+    this: InteractiveModePresentation,
+    expanded: boolean,
+  ): void;
 };
 type CalmOperationalUserLayoutPatch = {
+  forcedRedraws: number;
   hidesOperationalInput: () => boolean;
   isOperationalInput: (text: string) => boolean;
 };
@@ -45,6 +57,21 @@ const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-operational-user-layout:pi-0.81.1",
 );
 const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
+
+function operationalUserLayoutPatch(): CalmOperationalUserLayoutPatch | undefined {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmOperationalUserLayoutPatch | undefined;
+  };
+  return registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
+}
+
+export function requestCalmOperationalUserLayoutRedraw(): void {
+  const patch = operationalUserLayoutPatch();
+  if (!patch) {
+    throw new Error("Firstmate Calm operational-user layout is not installed");
+  }
+  patch.forcedRedraws += 2;
+}
 
 function contentIsTextOnly(content: unknown): boolean {
   if (typeof content === "string") return true;
@@ -78,14 +105,28 @@ export function installCalmOperationalUserLayout(): void {
   }
 
   const patch: CalmOperationalUserLayoutPatch = {
+    forcedRedraws: 0,
     hidesOperationalInput,
     isOperationalInput,
   };
   const prototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
   const originalAddMessageToChat = prototype.addMessageToChat;
+  const originalSetToolsExpanded = prototype.setToolsExpanded;
   if (typeof originalAddMessageToChat !== "function") {
     throw new Error("Firstmate Calm requires Pi InteractiveMode.addMessageToChat");
   }
+  if (typeof originalSetToolsExpanded !== "function") {
+    throw new Error("Firstmate Calm requires Pi InteractiveMode.setToolsExpanded");
+  }
+
+  prototype.setToolsExpanded = function (expanded: boolean): void {
+    originalSetToolsExpanded.call(this, expanded);
+    if (patch.forcedRedraws <= 0) return;
+    patch.forcedRedraws -= 1;
+    this.ui.invalidate();
+    this.ui.terminal.clearScreen();
+    this.ui.requestRender(true);
+  };
 
   class CalmOperationalUserMessageComponent extends UserMessageComponent {
     private readonly hasLeadingSpacer: boolean;
