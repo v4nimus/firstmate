@@ -136,8 +136,11 @@ import { pathToFileURL } from "node:url";
 let handler = null;
 let notification = "";
 let prompt = "";
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand(name, options) {
     if (name === "fm-watch-arm-pi") handler = options.handler;
   },
@@ -187,6 +190,7 @@ if (!prompt.includes("watcher: healthy pid=1")) {
   console.error(prompt);
   process.exit(1);
 }
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
 EOF
 )
   status=$?
@@ -475,6 +479,125 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+test_pi_unsettled_wakes_coalesce_and_alert() {
+  local repo home plugin log release stop alert_log out status
+  repo="$TMP_ROOT/pi-wake-coalesce-root"
+  home="$TMP_ROOT/pi-wake-coalesce-home"
+  log="$TMP_ROOT/pi-wake-coalesce.log"
+  release="$TMP_ROOT/pi-wake-coalesce.release"
+  stop="$TMP_ROOT/pi-wake-coalesce.stop"
+  alert_log="$TMP_ROOT/pi-wake-coalesce-alert.log"
+  mkdir -p "$repo/bin" "$repo/fakebin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -le 4 ]; then
+  printf 'stale: synthetic-unresolved-%s\n' "$count"
+  exit 0
+fi
+if [ "$count" -eq 5 ]; then
+  trap 'exit 0' TERM INT
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  printf 'stale: synthetic-after-human-input\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  cat > "$repo/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_ALERT_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/fakebin/herdr"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_ALERT_LOG="$alert_log" HERDR_ENV=1 \
+    PATH="$repo/fakebin:$PATH" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const marker = `${process.env.FM_HOME}/state/.pi-wake-undelivered`;
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-coalesce", {}, undefined, undefined, {});
+for (let i = 0; i < 500; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 5 && existsSync(marker) && existsSync(process.env.FM_ALERT_LOG)) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (prompts.length !== 1) {
+  throw new Error(`unsettled wake flood reached the model ${prompts.length} times`);
+}
+if (!prompts[0]?.includes("synthetic-unresolved-1")) {
+  throw new Error(`first actionable wake was not delivered: ${prompts.join(" | ")}`);
+}
+if (!existsSync(marker)) throw new Error("undelivered wake marker was not written");
+const markerText = readFileSync(marker, "utf8");
+if (!markerText.includes("suppressed=3")) {
+  throw new Error(`undelivered wake marker did not count coalesced notifications: ${markerText}`);
+}
+const alert = readFileSync(process.env.FM_ALERT_LOG, "utf8");
+if (!alert.includes("notification show firstmate needs attention")) {
+  throw new Error(`Herdr attention notification was not sent: ${alert}`);
+}
+await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: prompts[0] }, {});
+await handlers.get("agent_end")?.({
+  type: "agent_end",
+  messages: [{ role: "assistant", stopReason: "error", errorMessage: "usage limit reached" }],
+}, {});
+await handlers.get("agent_settled")?.();
+if (!existsSync(marker)) throw new Error("failed watcher turn cleared the unresolved wake latch");
+const failedTurnMarker = readFileSync(marker, "utf8");
+if (!failedTurnMarker.includes("usage limit reached")) {
+  throw new Error(`failed watcher turn did not preserve its provider error: ${failedTurnMarker}`);
+}
+await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: "captain checking the session" }, {});
+if (existsSync(marker)) throw new Error("direct captain input did not acknowledge the unresolved wake");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+for (let i = 0; i < 500 && prompts.length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (prompts.length !== 2 || !prompts[1]?.includes("synthetic-after-human-input")) {
+  throw new Error(`watcher did not resume after direct captain input: ${prompts.join(" | ")}`);
+}
+await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: prompts[1] }, {});
+await handlers.get("agent_end")?.({
+  type: "agent_end",
+  messages: [{ role: "assistant", stopReason: "stop" }],
+}, {});
+await handlers.get("agent_settled")?.();
+if (existsSync(marker)) throw new Error("successful watcher turn did not clear the unresolved wake marker");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  [ "$status" -eq 0 ] \
+    || fail "Pi unresolved watcher notifications must coalesce and alert outside the model session: $out"
+  [ -z "$out" ] || fail "Pi wake-coalescing test printed output: $out"
+  pass "Pi unresolved notifications coalesce, alert outside the model, and resume after captain input"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -665,6 +788,7 @@ const pi = {
 const rows = () => existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
+const undeliveredWakeMarker = `${process.env.FM_HOME}/state/.pi-wake-undelivered`;
 async function waitFor(predicate, message) {
   for (let i = 0; i < 500; i += 1) {
     if (predicate()) return;
@@ -689,12 +813,17 @@ if (rows().length !== 2) throw new Error(`unretired arm overlapped before fallba
 if (!prompts[0]?.includes("original wake")) throw new Error(`missing original fallback: ${prompts.join(" | ")}`);
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
 for (let i = 0; i < 500; i += 1) {
-  if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || prompts.some((message) => message.includes("late wake")))) break;
+  const preservedLateWake = existsSync(undeliveredWakeMarker)
+    && readFileSync(undeliveredWakeMarker, "utf8").includes("late wake");
+  if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || preservedLateWake)) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (rows().length !== 3) throw new Error(`late close did not restore one successor: ${rows().join(" | ")}`);
 if (process.env.FM_LATE_KIND === "actionable") {
-  if (prompts.length !== 2 || !prompts[1].includes("late wake")) throw new Error(`late actionable close was not delivered: ${prompts.join(" | ")}`);
+  if (prompts.length !== 1) throw new Error(`late actionable close sent another model wake: ${prompts.join(" | ")}`);
+  if (!existsSync(undeliveredWakeMarker)) throw new Error("late actionable close was not preserved");
+  const preserved = readFileSync(undeliveredWakeMarker, "utf8");
+  if (!preserved.includes("late wake")) throw new Error(`late actionable close was not preserved: ${preserved}`);
 } else if (prompts.length !== 1) {
   throw new Error(`late non-actionable close sent an extra wake: ${prompts.join(" | ")}`);
 }
@@ -706,7 +835,7 @@ EOF
     expect_code 0 "$status" "Pi late $kind close must remain supervised after fallback"
     [ -z "$out" ] || fail "Pi late-$kind test printed output: $out"
   done
-  pass "Pi late unretired closes resume classified supervision"
+  pass "Pi late unretired closes resume classified supervision without duplicate model wakes"
 }
 
 test_pi_empty_close_retries_instead_of_disappearing() {
@@ -2285,6 +2414,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_unsettled_wakes_coalesce_and_alert
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision

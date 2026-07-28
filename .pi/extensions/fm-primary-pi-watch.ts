@@ -17,7 +17,7 @@
 // replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -61,6 +61,13 @@ type SessionGeneration = {
   retryFailures: number;
   restoring: boolean;
   seq: number;
+  wakePending: boolean;
+  suppressedWakes: number;
+  lastAttentionAt: number;
+  wakeRunActive: boolean;
+  wakeRunCurrent: boolean;
+  wakeRunSucceeded: boolean;
+  wakeRunFailure: string;
 };
 
 function refreshWatchToolShell(
@@ -91,12 +98,17 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
+const undeliveredWakeMarker = `${state}/.pi-wake-undelivered`;
+const operationalInputPrefix = "\u2063FIRSTMATE_OP: ";
+const watcherOperationalInputPrefix = `${operationalInputPrefix}v1 watcher: `;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 const armReadyTimeoutMs = positiveInteger("FM_PI_ARM_READY_TIMEOUT_MS", 12000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const wakeAttentionThreshold = positiveInteger("FM_PI_WAKE_ATTENTION_THRESHOLD", 3);
+const wakeAttentionRepeatMs = positiveInteger("FM_PI_WAKE_ATTENTION_REPEAT_MS", 15 * 60 * 1000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 const notActiveOwnerMessage = "watcher: not armed - another live Pi session generation owns watcher supervision; this binding stays idle until that session ends";
@@ -197,6 +209,13 @@ function createGeneration(): SessionGeneration {
     retryFailures: 0,
     restoring: false,
     seq: 0,
+    wakePending: false,
+    suppressedWakes: 0,
+    lastAttentionAt: 0,
+    wakeRunActive: false,
+    wakeRunCurrent: false,
+    wakeRunSucceeded: false,
+    wakeRunFailure: "",
   };
 }
 
@@ -268,13 +287,69 @@ export default function (pi: ExtensionAPI) {
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  function recordUndeliveredWake(owner: SessionGeneration, message: string): void {
+    const now = Date.now();
+    const compact = message.replace(/\s+/g, " ").slice(0, 1000);
+    try {
+      mkdirSync(state, { recursive: true });
+      writeFileSync(
+        undeliveredWakeMarker,
+        `timestamp=${new Date(now).toISOString()}\nsuppressed=${owner.suppressedWakes}\nmessage=${compact}\n`,
+      );
+    } catch {
+    }
+    if (owner.suppressedWakes < wakeAttentionThreshold) return;
+    if (now - owner.lastAttentionAt < wakeAttentionRepeatMs) return;
+    owner.lastAttentionAt = now;
+    if (process.env.HERDR_ENV !== "1" && !process.env.HERDR_PANE_ID) return;
+    spawnSync(
+      "herdr",
+      [
+        "notification",
+        "show",
+        "firstmate needs attention",
+        "--body",
+        `A worker update has remained unresolved through ${owner.suppressedWakes} additional notifications. Open the FirstMate session; details are preserved in ${undeliveredWakeMarker}.`,
+        "--sound",
+        "request",
+      ],
+      { timeout: 10_000, stdio: "ignore" },
+    );
+  }
+
+  function clearPendingWake(owner: SessionGeneration): void {
+    owner.wakePending = false;
+    owner.suppressedWakes = 0;
+    owner.lastAttentionAt = 0;
+    owner.wakeRunActive = false;
+    owner.wakeRunCurrent = false;
+    owner.wakeRunSucceeded = false;
+    owner.wakeRunFailure = "";
+    try {
+      rmSync(undeliveredWakeMarker, { force: true });
+    } catch {
+    }
+  }
+
   async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
     if (!generationIsLive(owner)) return;
-    const content = encodeFirstmateOperationalInput(
-      "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
-    );
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
+    if (owner.wakePending) {
+      owner.suppressedWakes += 1;
+      recordUndeliveredWake(owner, message);
+      return;
+    }
+    owner.wakePending = true;
+    try {
+      const content = encodeFirstmateOperationalInput(
+        "watcher",
+        `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      );
+      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+    } catch (error) {
+      owner.suppressedWakes = Math.max(owner.suppressedWakes + 1, wakeAttentionThreshold);
+      recordUndeliveredWake(owner, `${message}\ndelivery-error=${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -491,6 +566,62 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("session_shutdown", () => {
     deactivateGeneration(generation);
+  });
+  pi.on?.("before_agent_start", (event) => {
+    if (!generationIsLive(generation)) return;
+    if (event.prompt.startsWith(watcherOperationalInputPrefix)) {
+      generation.wakeRunActive = true;
+      generation.wakeRunCurrent = true;
+      generation.wakeRunSucceeded = false;
+      generation.wakeRunFailure = "";
+      return;
+    }
+    generation.wakeRunCurrent = false;
+    if (
+      !event.prompt.startsWith(operationalInputPrefix) &&
+      generation.wakePending
+    ) {
+      clearPendingWake(generation);
+    }
+  });
+  pi.on?.("agent_end", (event) => {
+    if (
+      !generationIsLive(generation) ||
+      !generation.wakeRunActive ||
+      !generation.wakeRunCurrent
+    ) {
+      return;
+    }
+    const lastAssistant = [...event.messages].reverse().find((message) => message.role === "assistant");
+    if (!lastAssistant || lastAssistant.role !== "assistant") {
+      generation.wakeRunFailure = "watcher follow-up ended without an assistant response";
+      return;
+    }
+    if (lastAssistant.stopReason === "error" || lastAssistant.stopReason === "aborted") {
+      generation.wakeRunFailure =
+        lastAssistant.errorMessage ||
+        `watcher follow-up ended with ${lastAssistant.stopReason}`;
+      return;
+    }
+    generation.wakeRunSucceeded = true;
+    generation.wakeRunFailure = "";
+  });
+  pi.on?.("agent_settled", () => {
+    if (!generationIsLive(generation) || !generation.wakeRunActive) return;
+    if (generation.wakeRunSucceeded) {
+      clearPendingWake(generation);
+      return;
+    }
+    generation.wakeRunActive = false;
+    generation.wakeRunCurrent = false;
+    generation.wakeRunSucceeded = false;
+    generation.suppressedWakes = Math.max(generation.suppressedWakes + 1, wakeAttentionThreshold);
+    recordUndeliveredWake(
+      generation,
+      generation.wakeRunFailure ||
+        "watcher follow-up settled without a successful assistant response",
+    );
+    generation.wakeRunFailure = "";
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {

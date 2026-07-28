@@ -8,6 +8,10 @@ Must-work continuity now lives above that process boundary instead of depending 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
 A failed follow-up never cancels continuity restoration.
+Pi admits at most one watcher follow-up while that wake remains unacknowledged.
+A watcher-typed run acknowledges the follow-up only after its final assistant response ends without a provider error or abort, so a usage-limit failure cannot reopen the notification floodgate.
+Later watcher events stay in the durable wake queue, update `state/.pi-wake-undelivered`, and trigger a bounded Herdr attention notification after three suppressed events or immediately after a failed watcher turn when the Herdr environment is available.
+A direct captain prompt clears the unresolved latch and allows one later watcher follow-up, while a successful watcher run clears it automatically.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
@@ -53,6 +57,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+The same suite verifies that unresolved Pi wakes coalesce into one model turn, provider failures preserve the latch and raise the Herdr attention path, direct captain input resumes delivery, and a successful watcher run clears the marker.
 The same suite covers the whole session-generation ownership contract stated in `.pi/extensions/fm-primary-pi-watch.ts`, from ordinary same-process replacement through terminal quit, and [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records its observed guarantees.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.

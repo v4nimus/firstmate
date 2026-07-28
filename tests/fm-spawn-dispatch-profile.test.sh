@@ -454,6 +454,59 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_backlog_scout_kind_refuses_ship_spawn() {
+  local rec id out status
+  id=profile-backlog-scout-z17
+  rec=$(make_spawn_case profile-backlog-scout claude "$id")
+  read_case_record "$rec"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - Research task (repo: project) (kind: scout)\n' "$id" \
+    > "$HOME_DIR/data/backlog.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a backlog scout launched without --scout should be refused"
+  assert_contains "$out" "backlog records task $id as kind=scout; rerun this spawn with --scout" \
+    "scout-kind mismatch did not explain the corrective launch flag"
+  assert_absent "$HOME_DIR/state/$id.meta" "scout-kind mismatch wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "scout-kind mismatch typed a launch command"
+  pass "durable scout tasks cannot be launched as implementation tasks"
+}
+
+test_backlog_ship_kind_refuses_scout_spawn() {
+  local rec id out status
+  id=profile-backlog-ship-z18
+  rec=$(make_spawn_case profile-backlog-ship claude "$id")
+  read_case_record "$rec"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - Implementation task (repo: project) (kind: ship)\n' "$id" \
+    > "$HOME_DIR/data/backlog.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 1 "$status" "a backlog ship launched with --scout should be refused"
+  assert_contains "$out" "backlog records task $id as kind=ship; rerun this spawn without --scout" \
+    "ship-kind mismatch did not explain the corrective launch flag"
+  assert_absent "$HOME_DIR/state/$id.meta" "ship-kind mismatch wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "ship-kind mismatch typed a launch command"
+  pass "durable implementation tasks cannot be launched as scouts"
+}
+
+test_backlog_scout_kind_allows_matching_spawn() {
+  local rec id out status
+  id=profile-backlog-scout-match-z19
+  rec=$(make_spawn_case profile-backlog-scout-match claude "$id")
+  read_case_record "$rec"
+  printf '# Backlog\n\n## In flight\n- [ ] %s - Research task (repo: project) (kind: scout)\n' "$id" \
+    > "$HOME_DIR/data/backlog.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "a matching backlog scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=claude kind=scout" \
+    "matching scout spawn did not preserve the recorded kind"
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "matching scout spawn metadata lost kind=scout"
+  pass "matching durable scout and spawn kinds proceed normally"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -473,5 +526,8 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_backlog_scout_kind_refuses_ship_spawn
+test_backlog_ship_kind_refuses_scout_spawn
+test_backlog_scout_kind_allows_matching_spawn
 
 echo "# all fm-spawn-dispatch-profile tests passed"

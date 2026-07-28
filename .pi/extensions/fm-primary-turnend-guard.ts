@@ -101,6 +101,10 @@ function runPretoolCheck(command: string): Promise<{ code: number; stderr: strin
   return runChecker("fm-arm-pretool-check.sh", command);
 }
 
+function runPiPrimaryWaitCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-pi-primary-wait-check.sh", command);
+}
+
 function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
   return runChecker("fm-cd-pretool-check.sh", command);
 }
@@ -129,6 +133,10 @@ export default function (pi: ExtensionAPI) {
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    }
+    const waitResult = await runPiPrimaryWaitCheck(command);
+    if (waitResult.code === 2) {
+      return { block: true, reason: waitResult.stderr.trim() || "denied by the Pi primary wait PreToolUse seatbelt" };
     }
     const result = await runPretoolCheck(command);
     if (result.code !== 2) return {};
