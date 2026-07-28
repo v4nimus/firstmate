@@ -81,6 +81,8 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   When data/backlog.md already records a ship or scout kind for the task,
+#   fm-spawn refuses a conflicting launch before it creates a task endpoint.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -377,6 +379,35 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+
+backlog_task_kind() {  # <task-id>; prints ship|scout when the durable task records one
+  local task_id=$1 backlog="$DATA/backlog.md" line prefix_open prefix_done
+  [ -f "$backlog" ] || return 1
+  prefix_open="- [ ] $task_id - "
+  prefix_done="- [x] $task_id - "
+  line=$(awk -v open="$prefix_open" -v done="$prefix_done" '
+    index($0, open) == 1 || index($0, done) == 1 { print; exit }
+  ' "$backlog")
+  [ -n "$line" ] || return 1
+  case "$line" in
+    *" (kind: scout)"*) printf '%s\n' scout ;;
+    *" (kind: ship)"*) printf '%s\n' ship ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$KIND" != secondmate ]; then
+  RECORDED_KIND=$(backlog_task_kind "$ID" || true)
+  if [ -n "$RECORDED_KIND" ] && [ "$RECORDED_KIND" != "$KIND" ]; then
+    if [ "$RECORDED_KIND" = scout ]; then
+      echo "error: backlog records task $ID as kind=scout; rerun this spawn with --scout" >&2
+    else
+      echo "error: backlog records task $ID as kind=ship; rerun this spawn without --scout" >&2
+    fi
+    exit 1
+  fi
+fi
+
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2

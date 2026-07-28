@@ -1,6 +1,6 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Compatibility boundary: Pi 0.81.1 and 0.82.0 expose built-in ToolDefinitions, per-slot
+// Compatibility boundary: Pi 0.81.1 through 0.82.1 expose built-in ToolDefinitions, per-slot
 // renderers, renderShell: "self", session_start replacement reasons,
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
 // setHiddenThinkingLabel(). The focused tests pin those assumptions. Version-bounded
@@ -34,7 +34,10 @@ import {
 import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
-import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import {
+  installCalmOperationalUserLayout,
+  requestCalmOperationalUserLayoutRedraw,
+} from "./lib/fm-calm-operational-user-layout.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -73,6 +76,7 @@ type StandardShellState = {
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
+const CALM_REDRAW_SETTLE_MS = 50;
 
 export default function (pi: ExtensionAPI) {
   installCalmAssistantLayout();
@@ -251,6 +255,7 @@ export default function (pi: ExtensionAPI) {
         exportRendering = false;
         setCalmStockExportRendering(false);
         publishPresentationState();
+        requestCalmOperationalUserLayoutRedraw();
         const expanded = ctx.ui.getToolsExpanded();
         ctx.ui.setToolsExpanded(!expanded);
         ctx.ui.setToolsExpanded(expanded);
@@ -260,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("calm", {
     description: "Toggle Firstmate's supported conversation-only transcript presentation.",
-    handler: async (_args, ctx) => {
+    handler: (_args, ctx) => {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);
       setCalmPresentation(active);
@@ -269,9 +274,14 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
 
-      const expanded = ctx.ui.getToolsExpanded();
-      ctx.ui.setToolsExpanded(!expanded);
-      ctx.ui.setToolsExpanded(expanded);
+      const redrawTranscript = () => {
+        requestCalmOperationalUserLayoutRedraw();
+        const expanded = ctx.ui.getToolsExpanded();
+        ctx.ui.setToolsExpanded(!expanded);
+        ctx.ui.setToolsExpanded(expanded);
+      };
+      redrawTranscript();
+      setTimeout(redrawTranscript, CALM_REDRAW_SETTLE_MS);
     },
   });
 }

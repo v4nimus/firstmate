@@ -16,7 +16,7 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
-PI_COMPAT_VERSIONS="0.81.1 0.82.0"
+PI_COMPAT_VERSIONS="0.81.1 0.82.0 0.82.1"
 
 require_pi_compat_version() {
   local version=$1 context=$2
@@ -85,6 +85,8 @@ test_static_contract() {
   assert_not_contains "$text" 'setCalmPresentation(false)' "Pi calm extension still resets the toggle on session start"
   assert_contains "$text" 'ctx.ui.setToolsExpanded(!expanded)' "Pi calm extension does not redraw existing custom entries"
   assert_contains "$text" 'ctx.ui.setToolsExpanded(expanded)' "Pi calm extension does not restore Ctrl+O state after redraw"
+  assert_contains "$text" 'setTimeout(redrawTranscript, CALM_REDRAW_SETTLE_MS)' "Pi calm extension does not queue a forced redraw after Pi finishes the command"
+  assert_contains "$text" 'requestCalmOperationalUserLayoutRedraw()' "Pi calm extension does not scope forced redraws to its own transcript refreshes"
   assert_not_contains "$text" 'ctx.navigateTree' "Pi calm extension reconstructs the transcript and drops transient diagnostics"
   assert_not_contains "$visibility" 'deliverFirstmateSyntheticInput' "Pi calm visibility policy can still replace operational input semantics"
   assert_not_contains "$visibility" 'classifyFirstmateSyntheticInput' "Pi calm visibility policy still classifies operational input for interception"
@@ -96,6 +98,11 @@ test_static_contract() {
   assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
   assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
+  assert_contains "$operational_user_layout" 'prototype.setToolsExpanded' "Pi Calm operational-user layout does not patch Pi's shrink redraw boundary"
+  assert_contains "$operational_user_layout" 'patch.forcedRedraws -= 1' "Pi Calm operational-user layout does not consume explicitly scoped forced redraws"
+  assert_contains "$operational_user_layout" 'this.ui.invalidate()' "Pi Calm operational-user layout does not invalidate stale transcript rows"
+  assert_contains "$operational_user_layout" 'this.ui.terminal.clearScreen()' "Pi Calm operational-user layout does not clear Pi's stale visible terminal rows"
+  assert_contains "$operational_user_layout" 'this.ui.requestRender(true)' "Pi Calm operational-user layout does not request Pi's native forced redraw"
   assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
   assert_contains "$operational_user_layout" 'text.includes("\u2063")' "Pi Calm operational-user layout spawns its classifier for ordinary captain rows"
   assert_contains "$operational_user_layout" '"\u2063Supervisor escalate ("' "Pi Calm operational-user layout lost the narrow legacy marker"
