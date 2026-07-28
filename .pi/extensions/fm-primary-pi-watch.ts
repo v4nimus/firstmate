@@ -95,6 +95,7 @@ const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
+let processExitCleanupInstalled = false;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -190,8 +191,22 @@ function createGeneration(): SessionGeneration {
   };
 }
 
+function installProcessExitCleanup(): void {
+  if (processExitCleanupInstalled) return;
+  process.once("exit", cleanupOnProcessExit);
+  processExitCleanupInstalled = true;
+}
+
+function removeProcessExitCleanup(): void {
+  if (!processExitCleanupInstalled) return;
+  process.off("exit", cleanupOnProcessExit);
+  processExitCleanupInstalled = false;
+}
+
 function activateGeneration(generation: SessionGeneration): void {
+  if (activeGeneration && activeGeneration !== generation && !activeGeneration.stopping) return;
   activeGeneration = generation;
+  installProcessExitCleanup();
 }
 
 function generationIsLive(generation: SessionGeneration): boolean {
@@ -206,10 +221,17 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.child = null;
 }
 
+function deactivateGeneration(generation: SessionGeneration): void {
+  stopGeneration(generation);
+  if (activeGeneration !== generation) return;
+  activeGeneration = null;
+  removeProcessExitCleanup();
+}
+
 const cleanupOnProcessExit = () => {
+  processExitCleanupInstalled = false;
   if (activeGeneration) stopGeneration(activeGeneration);
 };
-process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
@@ -453,7 +475,7 @@ export default function (pi: ExtensionAPI) {
     markLoaded();
   });
   pi.on?.("session_shutdown", () => {
-    stopGeneration(generation);
+    deactivateGeneration(generation);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {
